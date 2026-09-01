@@ -12,7 +12,7 @@ KEYSTORE="$OUT/keystore.jks"
 KEY_ALIAS="termuxwidget"
 STORE_PASS="termuxtasks"
 KEY_PASS="termuxtasks"
-FRAMEWORK="$PROJECT/framework-res.apk"
+FRAMEWORK="/system/framework/framework-res.apk"
 
 # Auto-increment versionCode so the system re-registers the widget provider
 VC=$(($(cat "$PROJECT/.version" 2>/dev/null || echo 0) + 1))

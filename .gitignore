@@ -12,6 +12,9 @@ classes/
 .idea/
 build/
 
+framework-res.apk
+.version
+
 # OS
 .DS_Store
 Thumbs.db
