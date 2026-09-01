@@ -1,0 +1,17 @@
+# Android
+*.apk
+*.dex
+*.jks
+*.idsig
+*.class
+out/
+classes/
+
+# IDE
+.gradle/
+.idea/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
