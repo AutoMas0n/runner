@@ -1,4 +1,4 @@
-package com.termuxwidget;
+package com.runner;
 
 import android.app.Activity;
 import android.app.PendingIntent;
@@ -7,15 +7,18 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.util.Log;
 import android.widget.RemoteViews;
 
 public class MainActivity extends Activity {
 
+    private static final String TAG = "RunnerMain";
     private static final int REQ_RUN_COMMAND = 1001;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Log.i(TAG, "onCreate — launched");
 
         if (checkSelfPermission("com.termux.permission.RUN_COMMAND")
                 == PackageManager.PERMISSION_GRANTED) {
@@ -44,23 +47,15 @@ public class MainActivity extends Activity {
             AppWidgetManager mgr = AppWidgetManager.getInstance(this);
             ComponentName cn = new ComponentName(this, TaskWidget.class);
             int[] ids = mgr.getAppWidgetIds(cn);
+            Log.i(TAG, "setupWidget: getAppWidgetIds returned " + (ids == null ? "null" : ids.length + " ids"));
             if (ids != null) {
                 for (int id : ids) {
-                    Intent tap = new Intent(this, MainActivity.class);
-                    tap.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-                    PendingIntent pi = PendingIntent.getActivity(
-                        this, id, tap,
-                        PendingIntent.FLAG_UPDATE_CURRENT
-                    );
-
-                    RemoteViews views = new RemoteViews(getPackageName(), R.layout.widget_layout);
-                    views.setOnClickPendingIntent(R.id.btn_run, pi);
-                    mgr.updateAppWidget(id, views);
+                    Log.i(TAG, "setupWidget: arming widget " + id);
+                    TaskWidget.setPendingIntent(this, mgr, id);
                 }
             }
         } catch (Exception e) {
-            // ignore
+            Log.e(TAG, "setupWidget failed", e);
         }
     }
 
@@ -75,8 +70,9 @@ public class MainActivity extends Activity {
 
         try {
             startService(i);
+            Log.i(TAG, "fire: RUN_COMMAND sent to Termux");
         } catch (Exception e) {
-            // ignore
+            Log.e(TAG, "fire failed", e);
         }
 
         finish();
