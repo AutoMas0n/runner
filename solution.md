@@ -96,9 +96,35 @@ adb logcat -s RunnerWidget:* RunnerMain:*
 3. **OEM freezer/battery managers are the #1 cause of "widget/app dead in background"** on Motorola/Xiaomi/OnePlus/Samsung. Check `isFrozen` before blaming PendingIntent.
 4. **`isFrozen=true` + `reason=moto_freezer` + `APPWIDGET broadcast dropped`** is the signature. Don't chase intent flags until you've ruled it out.
 
+## Appendix: Pixel 7 Pro / Android 14+ issue (Sep 2025)
+
+On a **Pixel 7 Pro (Android 14+)**, the same APK had a different problem: the widget tap opened the app, but the `termux-dialog` picker never appeared — the app flashed and closed.
+
+**Root cause:** Android 14+ blocks background activity launches — `com.termux.api/.apis.DialogAPI$DialogActivity` could not start from a background `RUN_COMMAND` process. The system log shows:
+
+```
+E ActivityTaskManager: Background activity launch blocked!
+  cmp=com.termux.api/.apis.DialogAPI$DialogActivity
+```
+
+**Fix:** Replaced the Termux dialog picker flow with the app's **own GUI** using a **clipboard bridge**:
+
+1. App sends `RUN_COMMAND` to Termux running `~/.shortcuts/widget-list`
+2. The script writes the script names to the clipboard via `termux-clipboard-set`
+3. App polls the clipboard for up to 8s, detects the change, parses the list
+4. App shows the list in its own `ListView` (the foreground activity can show UI freely)
+5. User taps → app sends `RUN_COMMAND` for the selected script → finishes
+
+This is in `MainActivity.java` (v67+) with the clipboard-polling loop. Requires `termux-clipboard-set` from Termux:API.
+
+**Key differences from Motorola fix:**
+- No battery whitelist needed
+- No process freezing involved — the widget tap works, it's the dialog that's blocked
+- The app itself must show the picker, not delegate to a Termux system dialog
+
 ## State of the code
 
 - **Build:** javac + dx + aapt(old) + apksigner (Termux toolchain — was never the problem)
-- **Package:** `com.runner` (renamed during debugging; works)
-- **Working widget code:** `TaskWidget.java` with `onUpdate()` that sets a `getActivity()` PendingIntent (`MainActivity`), plus `Log.i` diagnostics
-- **To restore next:** real `MainActivity` behavior (Termux script picker flow from git history) — currently the diagnostic Toast version is installed
+- **Package:** `com.runner`
+- **Widget code:** `TaskWidget.java` with `onUpdate()` that sets a `getActivity()` PendingIntent (`MainActivity`) + widget re-arm
+- **App code:** `MainActivity.java` with clipboard-bridge GUI — shows script list, runs selected script via `RUN_COMMAND`
