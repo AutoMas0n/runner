@@ -22,16 +22,28 @@ public class TaskWidget extends AppWidgetProvider {
     static void setPendingIntent(Context context, AppWidgetManager mgr, int widgetId) {
         Log.i(TAG, "setPendingIntent for widget " + widgetId);
 
-        Intent tap = new Intent(context, MainActivity.class);
-        tap.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        // PendingIntent for the Run button (script list)
+        Intent tapRun = new Intent(context, MainActivity.class);
+        tapRun.setAction("com.runner.RUN");
+        tapRun.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        android.app.PendingIntent piRun = android.app.PendingIntent.getActivity(
+            context, 0, tapRun,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        );
 
-        android.app.PendingIntent pi = android.app.PendingIntent.getActivity(
-            context, 0, tap,
+        // PendingIntent for the aidhd button (task input dialogue)
+        Intent tapAidhd = new Intent(context, MainActivity.class);
+        tapAidhd.setAction("com.runner.AIDHD");
+        tapAidhd.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        tapAidhd.putExtra("command", "aidhd");
+        android.app.PendingIntent piAidhd = android.app.PendingIntent.getActivity(
+            context, 1, tapAidhd,
             android.app.PendingIntent.FLAG_UPDATE_CURRENT
         );
 
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
-        views.setOnClickPendingIntent(R.id.btn_run, pi);
+        views.setOnClickPendingIntent(R.id.btn_run, piRun);
+        views.setOnClickPendingIntent(R.id.btn_aidhd, piAidhd);
         mgr.updateAppWidget(widgetId, views);
         Log.i(TAG, "updateAppWidget called for widget " + widgetId);
     }
