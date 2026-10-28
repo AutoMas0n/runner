@@ -270,6 +270,7 @@ public class MainActivity extends Activity {
         final TextView submitBtn = findViewById(R.id.btn_submit);
         final TextView voiceBtn = findViewById(R.id.btn_voice);
         final TextView secretaryBtn = findViewById(R.id.btn_secretary);
+        final TextView remindersBtn = findViewById(R.id.btn_reminders);
         final TextView serveBtn = findViewById(R.id.btn_serve);
         final TextView backBtn = findViewById(R.id.btn_back);
 
@@ -317,6 +318,14 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 sendAidhdCommand("widget-aidhd-secretary");
+            }
+        });
+
+        // Reminders + wake-lock: idempotently enable reminders and toggle wake-lock
+        remindersBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                sendAidhdCommand("widget-aidhd-reminders");
             }
         });
 
