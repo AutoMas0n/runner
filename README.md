@@ -19,18 +19,21 @@ Widget tap (or app drawer)
        ↓
   MainActivity opens
        ↓
+  Registers BroadcastReceiver for com.runner.SCRIPTS
   Sends RUN_COMMAND → Termux runs ~/.shortcuts/widget-list
        ↓                                    ↓
-  Polls clipboard ←──── termux-clipboard-set ─── writes script names
+  widget-list broadcasts script list back via am broadcast
        ↓
-  Shows script list in its own ListView
+  BroadcastReceiver.onReceive() decodes and displays
        ↓
   Tap a script → RUN_COMMAND for ~/.shortcuts/widget-tasks/<script>
        ↓
   Script runs in Termux, app closes
 ```
 
-**Why not termux-dialog?** On Android 14+, the system blocks background activity launches — `termux-dialog` can't open its dialog from a background Termux process. The clipboard bridge (`termux-clipboard-set` → polling from our foreground app) bypasses this restriction entirely.
+**IPC approach:** The app uses Android's `BroadcastReceiver` system — a push-based IPC that avoids clipboard or file I/O entirely. Termux runs `am broadcast` to send the script list back to the app as an Intent extra. If broadcasting fails (e.g. on older Termux versions), it falls back to clipboard polling with a marker prefix and clipboard restore.
+
+**Why not termux-dialog?** On Android 14+, the system blocks background activity launches — `termux-dialog` can't open its dialog from a background Termux process. The broadcast-based IPC bypasses this restriction entirely.
 
 ## Requirements
 
@@ -45,7 +48,7 @@ Widget tap (or app drawer)
 
 Two scripts must exist in `~/.shortcuts/`:
 
-**`~/.shortcuts/widget-list`** — lists script names to the clipboard (used by the app):
+**`~/.shortcuts/widget-list`** — builds script list and sends it to the app via broadcast:
 
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
@@ -55,8 +58,35 @@ for f in "$TASK_DIR"/*; do
   [ -f "$f" ] || continue
   OUTPUT="${OUTPUT}$(basename "$f")"$'\n'
 done
-echo -n "$OUTPUT" | termux-clipboard-set
+
+# URL-encode for safe transport in Intent extra
+urlencode() {
+  local str="$1" out="" c
+  for ((i=0; i<${#str}; i++)); do
+    c="${str:$i:1}"
+    case "$c" in
+      [a-zA-Z0-9/._~-]) out="$out$c" ;;
+      ' ') out="$out+" ;;
+      *) printf -v out '%s%%%02X' "$out" "'$c" ;;
+    esac
+  done
+  echo -n "$out"
+}
+
+ENCODED=$(urlencode "$OUTPUT")
+
+# Broadcast to the app (push IPC, no clipboard involved)
+if command -v am &>/dev/null; then
+  am broadcast --user current \
+    "intent:#Intent;action=com.runner.SCRIPTS;S.scripts=${ENCODED};end" \
+    &>/dev/null && exit 0
+fi
+
+# Fallback: clipboard marker + restore
+printf 'RUNNER\x1f\x1e%s' "$OUTPUT" | termux-clipboard-set
 ```
+
+The primary path uses `am broadcast` to push data to the app. The fallback writes with a byte-marker prefix (`1F 1E`) so the app can distinguish our data from user clipboard content and restore the original.
 
 **`~/.shortcuts/widget-launcher`** — legacy interactive picker (for manual use in Termux):
 
@@ -118,10 +148,10 @@ See [`solution.md`](solution.md) for the full debugging story.
 
 ## ⚠️ Android 14+ background activity launch block
 
-On Android 14+, Termux:API's `termux-dialog` **cannot launch its dialog** when called from a background process (like `RUN_COMMAND` with `BACKGROUND=true`). The app's clipboard-bridge approach avoids this — but if you ever see the app stuck on "Loading scripts…", it means:
-- `termux-clipboard-set` is not writing to the clipboard (check `termux-clipboard-set` works in Termux)
+On Android 14+, Termux:API's `termux-dialog` **cannot launch its dialog** when called from a background process (like `RUN_COMMAND` with `BACKGROUND=true`). The app's broadcast-based IPC or clipboard fallback avoids this entirely — if you ever see the app stuck on "Loading scripts…", it means:
 - The `widget-list` script is missing or not executable in `~/.shortcuts/`
-- Termux:API is not installed (`pkg install termux-api`)
+- Termux:API is not installed (`pkg install termux-api`) (required for `RUN_COMMAND`)
+- `am` command not found or `am broadcast` fails (check with `which am`) — the script will then fall back to clipboard, which also must be working
 
 ---
 

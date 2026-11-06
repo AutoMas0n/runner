@@ -2,10 +2,12 @@ package com.runner;
 
 import android.app.Activity;
 import android.appwidget.AppWidgetManager;
-import android.content.ClipData;
+import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -25,23 +27,40 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * MainActivity for the Runner home-screen widget.
+ *
+ * Script list is fetched from Termux via push-based IPC:
+ *
+ *   Primary — Broadcast IPC:
+ *     1. App registers a BroadcastReceiver for "com.runner.SCRIPTS"
+ *     2. App sends RUN_COMMAND to run widget-list on Termux
+ *     3. widget-list sends an am broadcast back with the script
+ *        names URL-encoded in the "scripts" String extra
+ *     4. App's receiver decodes and displays — no clipboard used
+ *
+ *   Fallback — Clipboard marker + restore:
+ *     If the broadcast doesn't arrive within 10s, the app falls
+ *     back to the proven clipboard polling mechanism.
+ */
 public class MainActivity extends Activity {
 
     private static final String TAG = "RunnerMain";
     private static final int REQ_RUN_COMMAND = 1001;
     private static final int REQ_RECORD_AUDIO = 1002;
-    private static final long POLL_INTERVAL = 300;
-    private static final long POLL_TIMEOUT = 8_000;
+    // Clipboard fallback constants
+    private static final long POLL_INTERVAL = 400;
+    private static final long POLL_TIMEOUT = 10_000;
+    private static final String CLIP_MARKER = "RUNNER\u001F\u001E";
+    // Broadcast timeout
+    private static final long BROADCAST_TIMEOUT = 10_000;
 
     private ListView scriptList;
     private View loadingView;
     private TextView statusText;
     private Handler handler = new Handler(Looper.getMainLooper());
     private SpeechRecognizer speechRecognizer;
-    private long pollStart;
-
-    // Snapshot of clipboard content BEFORE we set it — to detect our own write
-    private String clipboardBefore = "";
+    private volatile boolean dataReceived = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,7 +83,7 @@ public class MainActivity extends Activity {
             armWidget();
             startFetch();
         } else {
-            statusText.setText("Grant permission…");
+            statusText.setText("Grant permission\u2026");
             requestPermissions(
                 new String[]{"com.termux.permission.RUN_COMMAND"},
                 REQ_RUN_COMMAND
@@ -102,20 +121,84 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void startFetch() {
-        showLoading("Loading scripts…");
+    // ────────────────────────────── Fetch strategy ───────────────────────────────
 
-        // Snapshot current clipboard so we can detect our own write
+    private void startFetch() {
+        showLoading("Loading scripts\u2026");
+
+        // Primary: push-based broadcast IPC
         try {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip = cm.getPrimaryClip();
-            clipboardBefore = (clip != null && clip.getItemCount() > 0)
-                    ? clip.getItemAt(0).coerceToText(this).toString() : "";
+            startBroadcastFetch();
+            return;
         } catch (Exception e) {
-            clipboardBefore = "";
+            Log.w(TAG, "Broadcast setup failed: " + e);
         }
 
-        // Send RUN_COMMAND to run widget-list (writes script names to clipboard)
+        // Fallback: clipboard polling with marker + restore
+        startClipboardFetch();
+    }
+
+    // ────────────────────────────── Broadcast IPC (push-based) ──────────────────
+
+    private BroadcastReceiver scriptsReceiver;
+
+    private void startBroadcastFetch() {
+        dataReceived = false;
+
+        // Register receiver for script list broadcasts
+        scriptsReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent intent) {
+                if (dataReceived) return;
+                Log.i(TAG, "broadcast: " + intent.getAction());
+                String encoded = intent.getStringExtra("scripts");
+                if (encoded != null && !encoded.isEmpty()) {
+                    Log.i(TAG, "broadcast data (" + encoded.length() + " chars)");
+                    final String data = urlDecode(encoded);
+                    final List<String> scripts = parseScriptList(data);
+                    dataReceived = true;
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (scripts.isEmpty()) {
+                                showEmpty();
+                            } else {
+                                showScriptList(scripts);
+                            }
+                        }
+                    });
+                } else {
+                    Log.w(TAG, "broadcast with no scripts extra");
+                }
+            }
+        };
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("com.runner.SCRIPTS");
+        registerReceiver(scriptsReceiver, filter);
+        Log.i(TAG, "receiver registered");
+
+        // Start timeout timer — fall back to clipboard if no broadcast arrives
+        final long startTime = System.currentTimeMillis();
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!dataReceived) {
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    Log.w(TAG, "broadcast timeout after " + elapsed + "ms");
+                    try {
+                        unregisterReceiver(scriptsReceiver);
+                    } catch (Exception ignored) {}
+                    startClipboardFetch();
+                }
+            }
+        }, BROADCAST_TIMEOUT);
+
+        // Send RUN_COMMAND to run widget-list on Termux
+        sendWidgetListCommand();
+    }
+
+    private void sendWidgetListCommand() {
         Intent i = new Intent("com.termux.RUN_COMMAND");
         i.setClassName("com.termux", "com.termux.app.RunCommandService");
         i.putExtra("com.termux.RUN_COMMAND_PATH",
@@ -129,54 +212,132 @@ public class MainActivity extends Activity {
             Log.i(TAG, "RUN_COMMAND sent for widget-list");
         } catch (Exception e) {
             Log.e(TAG, "startService failed", e);
-            showError("Termux not installed?");
-            finishDelayed(3000);
-            return;
+            if (!dataReceived) {
+                dataReceived = true;
+                showError("Termux not installed?");
+                finishDelayed(3000);
+            }
         }
-
-        // Start polling clipboard for the result
-        pollStart = System.currentTimeMillis();
-        pollClipboard();
     }
 
-    private void pollClipboard() {
-        long elapsed = System.currentTimeMillis() - pollStart;
+    // ────────────────────────────── Clipboard fallback ──────────────────────────
+
+    private void startClipboardFetch() {
+        if (dataReceived) return;
+
+        Log.i(TAG, "starting clipboard fallback");
+        final String clipboardBefore = getClipboardText();
+
+        sendWidgetListCommand();
+
+        pollForMarker(clipboardBefore, System.currentTimeMillis());
+    }
+
+    private void pollForMarker(final String userClipboard,
+                               final long startTime) {
+        long elapsed = System.currentTimeMillis() - startTime;
         if (elapsed > POLL_TIMEOUT) {
-            Log.w(TAG, "pollClipboard timed out after " + POLL_TIMEOUT + "ms");
-            // Fall back: just show an empty list with a message
+            Log.w(TAG, "poll timeout");
             showError("Could not reach Termux.\nTap app drawer to retry.");
             finishDelayed(3000);
             return;
         }
 
-        try {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip = cm.getPrimaryClip();
-            String current = (clip != null && clip.getItemCount() > 0)
-                    ? clip.getItemAt(0).coerceToText(this).toString() : "";
+        String current = getClipboardText();
 
-            // If clipboard changed from our snapshot, it's our script list
-            if (!current.equals(clipboardBefore) && !current.isEmpty()) {
-                Log.i(TAG, "Clipboard updated with script list");
-                List<String> scripts = parseScriptList(current);
-                if (scripts.isEmpty()) {
-                    showEmpty();
-                } else {
-                    showScriptList(scripts);
-                }
-                return;
+        if (current != null && current.startsWith(CLIP_MARKER)) {
+            Log.i(TAG, "marker found");
+            String data = current.substring(CLIP_MARKER.length());
+            setClipboardText(userClipboard);
+
+            List<String> scripts = parseScriptList(data);
+            if (scripts.isEmpty()) {
+                showEmpty();
+            } else {
+                showScriptList(scripts);
             }
-        } catch (Exception e) {
-            Log.e(TAG, "clipboard read error", e);
+            return;
         }
 
-        // Poll again
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                pollClipboard();
+                pollForMarker(userClipboard, startTime);
             }
         }, POLL_INTERVAL);
+    }
+
+    // ────────────────────────────── Clipboard helpers ──────────────────────────────
+
+    private ClipboardManager getClipboardManager() {
+        try {
+            return (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        } catch (Exception e) {
+            Log.e(TAG, "getClipboardManager failed", e);
+            return null;
+        }
+    }
+
+    private String getClipboardText() {
+        try {
+            ClipboardManager cm = getClipboardManager();
+            if (cm != null && cm.hasText()) {
+                CharSequence t = cm.getText();
+                return t != null ? t.toString() : "";
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "getClipboardText error", e);
+        }
+        return "";
+    }
+
+    private void setClipboardText(String text) {
+        try {
+            ClipboardManager cm = getClipboardManager();
+            if (cm != null) {
+                cm.setText(text);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "setClipboardText error", e);
+        }
+    }
+
+    // ────────────────────────────── Parse ──────────────────────────────
+
+    private String urlDecode(String s) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            int i = 0;
+            while (i < s.length()) {
+                char c = s.charAt(i);
+                if (c == '%' && i + 2 < s.length()) {
+                    int hi = hexVal(s.charAt(i + 1));
+                    int lo = hexVal(s.charAt(i + 2));
+                    if (hi >= 0 && lo >= 0) {
+                        sb.append((char) ((hi << 4) | lo));
+                        i += 3;
+                        continue;
+                    }
+                }
+                if (c == '+') {
+                    sb.append(' ');
+                } else {
+                    sb.append(c);
+                }
+                i++;
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "urlDecode error, using raw", e);
+            return s;
+        }
+    }
+
+    private int hexVal(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
     }
 
     private List<String> parseScriptList(String text) {
@@ -274,7 +435,6 @@ public class MainActivity extends Activity {
         final TextView serveBtn = findViewById(R.id.btn_serve);
         final TextView backBtn = findViewById(R.id.btn_back);
 
-        // Submit: pass title as RUN_COMMAND argument to widget-aidhd-add
         submitBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -285,20 +445,13 @@ public class MainActivity extends Activity {
                     return;
                 }
                 String title = input.toString();
-
-                // Disable button to prevent double-submit
                 submitBtn.setEnabled(false);
-
-                // Send title as argument directly
                 sendAidhdAddCommand(title);
-
-                // Clear input and re-enable
                 taskInput.setText("", android.widget.TextView.BufferType.EDITABLE);
                 submitBtn.setEnabled(true);
             }
         });
 
-        // Voice — Android's built-in SpeechRecognizer (app is in foreground)
         voiceBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -313,7 +466,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Secretary
         secretaryBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -321,7 +473,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Reminders + wake-lock: idempotently enable reminders and toggle wake-lock
         remindersBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -329,7 +480,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Serve
         serveBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -337,11 +487,9 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Back: switch back to script-list view
         backBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // Open a new Intent without "command" extra to show script list
                 Intent back = new Intent(MainActivity.this, MainActivity.class);
                 back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(back);
@@ -369,8 +517,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /// Send a task title directly as a RUN_COMMAND argument to widget-aidhd-add.
-    /// This bypasses the clipboard bridge, which is unreliable from background services.
     private void sendAidhdAddCommand(String title) {
         String path = "/data/data/com.termux/files/home/.shortcuts/widget-aidhd-add";
         Log.i(TAG, "sendAidhdAddCommand: " + path + " '" + title + "'");
@@ -391,8 +537,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /// Use Android's built-in SpeechRecognizer to capture voice.
-    /// The app is in the foreground so this works reliably across Android versions.
     private void startVoiceRecognition() {
         if (speechRecognizer != null) {
             speechRecognizer.destroy();
@@ -439,10 +583,7 @@ public class MainActivity extends Activity {
                 if (matches != null && !matches.isEmpty()) {
                     final String text = matches.get(0);
                     Log.i(TAG, "voice result: " + text);
-
-                    // Auto-submit: pass title as argument directly
                     sendAidhdAddCommand(text);
-
                     self.runOnUiThread(new Runnable() {
                         public void run() {
                             Toast.makeText(self,
